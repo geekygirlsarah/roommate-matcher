@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roommate Matcher</title>
+    <link rel="stylesheet" href="css/bootstrap.min.css">
+    <style>
+        body {
+            padding-top: 2rem;
+            background-color: #f8f9fa;
+        }
+        .container {
+            max-width: 900px;
+        }
+        .card {
+            margin-bottom: 2rem;
+        }
+        #result-area {
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="mb-4 text-center">Roommate Matcher</h1>
+        
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                Input Data
+            </div>
+            <div class="card-body">
+                <p class="card-text text-muted">
+                    Copy and paste from a spreadsheet. 
+                    Columns should be: <b>Name</b>, <b>Preferred Roommates</b> (comma-separated), and optionally <b>Avoid</b> (comma-separated).
+                    Rows should be separated by newlines, and columns by tabs (standard spreadsheet behavior).
+                </p>
+                <div class="mb-3">
+                    <label for="student-data" class="form-label">Student List</label>
+                    <textarea class="form-control" id="student-data" rows="8" placeholder="Alice	Bob, Charlie	David
+Bob	Alice, Charlie	
+Charlie	Alice, Bob	
+David	Eve	Alice"></textarea>
+                </div>
+                
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <label for="room-size" class="form-label">Room Size</label>
+                        <input type="number" class="form-control" id="room-size" value="4" min="1">
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check mt-4">
+                            <input class="form-check-input" type="checkbox" value="" id="require-mutual" checked>
+                            <label class="form-check-label" for="require-mutual">
+                                Prefer Mutual Roommates (Strong weighting)
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="d-grid gap-2">
+                    <button id="match-btn" class="btn btn-success btn-lg">Match Students</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="results-card" class="card d-none">
+            <div class="card-header bg-success text-white">
+                Matched Rooms
+            </div>
+            <div class="card-body">
+                <div id="result-area"></div>
+            </div>
+        </div>
+        
+        <div id="error-card" class="card d-none border-danger">
+            <div class="card-header bg-danger text-white">
+                Error
+            </div>
+            <div class="card-body" id="error-area">
+            </div>
+        </div>
+    </div>
+
+    <script src="js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.getElementById('match-btn').addEventListener('click', () => {
+            const dataText = document.getElementById('student-data').value.trim();
+            const roomSize = parseInt(document.getElementById('room-size').value) || 4;
+            const preferMutual = document.getElementById('require-mutual').checked;
+            
+            if (!dataText) {
+                showError("Please enter some student data.");
+                return;
+            }
+
+            try {
+                const students = parseData(dataText);
+                if (students.length === 0) {
+                    showError("No valid student data found.");
+                    return;
+                }
+                const rooms = performMatching(students, roomSize, preferMutual);
+                displayResults(rooms);
+            } catch (e) {
+                showError("Error processing data: " + e.message);
+                console.error(e);
+            }
+        });
+
+        function parseData(text) {
+            const lines = text.split(/\r?\n/);
+            const students = [];
+            
+            lines.forEach(line => {
+                if (!line.trim()) return;
+                const cols = line.split('\t');
+                const name = cols[0] ? cols[0].trim() : "";
+                if (!name) return;
+                
+                const preferred = cols[1] ? cols[1].split(',').map(s => s.trim()).filter(s => s) : [];
+                const avoid = cols[2] ? cols[2].split(',').map(s => s.trim()).filter(s => s) : [];
+                
+                students.push({
+                    name,
+                    preferred,
+                    avoid
+                });
+            });
+            return students;
+        }
+
+        function performMatching(students, roomSize, preferMutual) {
+            const studentMap = new Map();
+            students.forEach(s => studentMap.set(s.name, s));
+            
+            // Normalize names in preferred/avoid lists to match existing students
+            // (In case of typos or incomplete names, this is basic matching)
+            students.forEach(s => {
+                s.preferred = s.preferred.filter(p => studentMap.has(p));
+                s.avoid = s.avoid.filter(a => studentMap.has(a));
+            });
+
+            let unassigned = [...students];
+            
+            // Sort unassigned by "pickiness" or "popularity" to seed better?
+            // Actually, for a greedy algorithm, starting with students who have preferences
+            // might be better. Let's sort by number of preferences (descending).
+            unassigned.sort((a, b) => (b.preferred.length + b.avoid.length) - (a.preferred.length + a.avoid.length));
+
+            const rooms = [];
+
+            while (unassigned.length > 0) {
+                // Greedy heuristic:
+                // Start with a seed student (the one with the most preferences among remaining)
+                let currentRoom = [unassigned.shift()];
+                
+                while (currentRoom.length < roomSize && unassigned.length > 0) {
+                    let bestCandidateIndex = -1;
+                    let bestScore = -Infinity;
+
+                    for (let i = 0; i < unassigned.length; i++) {
+                        const candidate = unassigned[i];
+                        let score = calculateScore(candidate, currentRoom, studentMap, preferMutual);
+                        
+                        // Small tie-breaker: prefer candidate with more preferences?
+                        score += (candidate.preferred.length * 0.1);
+
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestCandidateIndex = i;
+                        }
+                    }
+
+                    if (bestCandidateIndex !== -1 && bestScore > -500000) {
+                        currentRoom.push(unassigned.splice(bestCandidateIndex, 1)[0]);
+                    } else {
+                        // Everyone left is blocked by someone in the current room
+                        // or we have run out of people. Start a new room.
+                        break;
+                    }
+                }
+                rooms.push(currentRoom);
+            }
+            
+            return rooms;
+        }
+
+        function calculateScore(candidate, currentRoom, studentMap, preferMutual) {
+            let score = 0;
+            
+            for (const roomie of currentRoom) {
+                // Hard avoidance check
+                if (candidate.avoid.includes(roomie.name) || roomie.avoid.includes(candidate.name)) {
+                    return -1000000; // Large penalty for avoidance
+                }
+
+                // Preference scores
+                const candidateWantsRoomie = candidate.preferred.includes(roomie.name);
+                const roomieWantsCandidate = roomie.preferred.includes(candidate.name);
+
+                if (candidateWantsRoomie && roomieWantsCandidate) {
+                    score += preferMutual ? 200 : 50; // Higher weight for mutual
+                } else if (candidateWantsRoomie || roomieWantsCandidate) {
+                    score += 20; // One-way preference
+                } else {
+                    // No preference either way
+                    score += 1; // Slight nudge to at least group people
+                }
+            }
+            
+            return score;
+        }
+
+        function displayResults(rooms) {
+            const resultArea = document.getElementById('result-area');
+            const resultsCard = document.getElementById('results-card');
+            const errorCard = document.getElementById('error-card');
+            
+            errorCard.classList.add('d-none');
+            resultsCard.classList.remove('d-none');
+            
+            let html = "";
+            rooms.forEach((room, index) => {
+                html += `<h5>Room ${index + 1}</h5>`;
+                html += `<ul>`;
+                room.forEach(s => {
+                    html += `<li>${s.name}</li>`;
+                });
+                html += `</ul>`;
+            });
+            
+            resultArea.innerHTML = html;
+        }
+
+        function showError(msg) {
+            const errorArea = document.getElementById('error-area');
+            const errorCard = document.getElementById('error-card');
+            const resultsCard = document.getElementById('results-card');
+            
+            resultsCard.classList.add('d-none');
+            errorCard.classList.remove('d-none');
+            errorArea.innerText = msg;
+        }
+    </script>
+</body>
+</html>
