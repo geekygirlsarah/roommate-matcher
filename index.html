@@ -135,55 +135,160 @@ David	Eve	Alice"></textarea>
             students.forEach(s => studentMap.set(s.name, s));
             
             // Normalize names in preferred/avoid lists to match existing students
-            // (In case of typos or incomplete names, this is basic matching)
             students.forEach(s => {
                 s.preferred = s.preferred.filter(p => studentMap.has(p));
                 s.avoid = s.avoid.filter(a => studentMap.has(a));
             });
 
-            let unassigned = [...students];
-            
-            // Sort unassigned by "pickiness" or "popularity" to seed better?
-            // Actually, for a greedy algorithm, starting with students who have preferences
-            // might be better. Let's sort by number of preferences (descending).
-            unassigned.sort((a, b) => (b.preferred.length + b.avoid.length) - (a.preferred.length + a.avoid.length));
+            // Run multiple iterations and keep the best one
+            let bestRooms = null;
+            let bestOverallScore = -Infinity;
+            const iterations = 100;
 
-            const rooms = [];
+            for (let iter = 0; iter < iterations; iter++) {
+                let unassigned = [...students];
+                // Shuffle for different starting points each iteration
+                // except the first one which we can keep sorted for stability
+                if (iter > 0) {
+                    for (let i = unassigned.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        [unassigned[i], unassigned[j]] = [unassigned[j], unassigned[i]];
+                    }
+                } else {
+                    unassigned.sort((a, b) => (b.preferred.length + b.avoid.length) - (a.preferred.length + a.avoid.length));
+                }
 
-            while (unassigned.length > 0) {
-                // Greedy heuristic:
-                // Start with a seed student (the one with the most preferences among remaining)
-                let currentRoom = [unassigned.shift()];
-                
-                while (currentRoom.length < roomSize && unassigned.length > 0) {
-                    let bestCandidateIndex = -1;
-                    let bestScore = -Infinity;
+                const currentIterationRooms = [];
+                while (unassigned.length > 0) {
+                    let currentRoom = [unassigned.shift()];
+                    
+                    while (currentRoom.length < roomSize && unassigned.length > 0) {
+                        let bestCandidateIndex = -1;
+                        let bestScore = -Infinity;
 
-                    for (let i = 0; i < unassigned.length; i++) {
-                        const candidate = unassigned[i];
-                        let score = calculateScore(candidate, currentRoom, studentMap, preferMutual);
-                        
-                        // Small tie-breaker: prefer candidate with more preferences?
-                        score += (candidate.preferred.length * 0.1);
+                        for (let i = 0; i < unassigned.length; i++) {
+                            const candidate = unassigned[i];
+                            let score = calculateScore(candidate, currentRoom, studentMap, preferMutual);
+                            
+                            // Boost candidates that satisfy SOMEONE in the current room
+                            // AND boost if the candidate's preferences are satisfied
+                            for (const roomie of currentRoom) {
+                                if (candidate.preferred.includes(roomie.name)) {
+                                    score += 15; // Candidate gets a preference
+                                }
+                                if (roomie.preferred.includes(candidate.name)) {
+                                    score += 15; // Roomie gets a preference
+                                }
+                            }
 
-                        if (score > bestScore) {
-                            bestScore = score;
-                            bestCandidateIndex = i;
+                            // Small tie-breaker
+                            score += (candidate.preferred.length * 0.1);
+
+                            if (score > bestScore) {
+                                bestScore = score;
+                                bestCandidateIndex = i;
+                            }
+                        }
+
+                        if (bestCandidateIndex !== -1 && bestScore > -500000) {
+                            currentRoom.push(unassigned.splice(bestCandidateIndex, 1)[0]);
+                        } else {
+                            break;
                         }
                     }
-
-                    if (bestCandidateIndex !== -1 && bestScore > -500000) {
-                        currentRoom.push(unassigned.splice(bestCandidateIndex, 1)[0]);
-                    } else {
-                        // Everyone left is blocked by someone in the current room
-                        // or we have run out of people. Start a new room.
-                        break;
-                    }
+                    currentIterationRooms.push(currentRoom);
                 }
-                rooms.push(currentRoom);
+
+                // Evaluate iteration quality
+                let iterationScore = evaluateRooms(currentIterationRooms, studentMap, preferMutual);
+                if (iterationScore > bestOverallScore) {
+                    bestOverallScore = iterationScore;
+                    bestRooms = currentIterationRooms;
+                }
+            }
+
+            // Perform local search (swaps) to improve the best result
+            if (bestRooms) {
+                bestRooms = improveRooms(bestRooms, studentMap, preferMutual, roomSize);
             }
             
+            return bestRooms;
+        }
+
+        function improveRooms(rooms, studentMap, preferMutual, roomSize) {
+            let currentBestScore = evaluateRooms(rooms, studentMap, preferMutual);
+            let improved = true;
+
+            // Simple hill climbing: try swapping students between rooms
+            while (improved) {
+                improved = false;
+                for (let i = 0; i < rooms.length; i++) {
+                    for (let j = i + 1; j < rooms.length; j++) {
+                        for (let ki = 0; ki < rooms[i].length; ki++) {
+                            for (let kj = 0; kj < rooms[j].length; kj++) {
+                                // Swap rooms[i][ki] and rooms[j][kj]
+                                let temp = rooms[i][ki];
+                                rooms[i][ki] = rooms[j][kj];
+                                rooms[j][kj] = temp;
+
+                                let newScore = evaluateRooms(rooms, studentMap, preferMutual);
+                                if (newScore > currentBestScore) {
+                                    currentBestScore = newScore;
+                                    improved = true;
+                                } else {
+                                    // Swap back
+                                    temp = rooms[i][ki];
+                                    rooms[i][ki] = rooms[j][kj];
+                                    rooms[j][kj] = temp;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             return rooms;
+        }
+
+        function evaluateRooms(rooms, studentMap, preferMutual) {
+            let totalScore = 0;
+            let zeroPrefMatches = 0;
+
+            rooms.forEach(room => {
+                room.forEach(student => {
+                    let matchedWithPref = false;
+                    room.forEach(roomie => {
+                        if (student === roomie) return;
+                        
+                        const wants = student.preferred.includes(roomie.name);
+                        const wantedBy = roomie.preferred.includes(student.name);
+
+                        if (wants && wantedBy) {
+                            totalScore += preferMutual ? 200 : 50;
+                            matchedWithPref = true;
+                        } else if (wants || wantedBy) {
+                            totalScore += 20;
+                            if (wants) matchedWithPref = true;
+                        } else {
+                            totalScore += 1;
+                        }
+                        
+                        // Hard penalty if avoidance is violated (though current greedy avoids it)
+                        if (student.avoid.includes(roomie.name) || roomie.avoid.includes(student.name)) {
+                            totalScore -= 1000000;
+                        }
+                    });
+                    
+                    if (student.preferred.length > 0 && !matchedWithPref) {
+                        zeroPrefMatches++;
+                    }
+                });
+            });
+
+            // Extra heavy penalty for anyone not getting any of their preferences
+            // and additional bonus for each student having at least one match
+            totalScore -= (zeroPrefMatches * 20000);
+            
+            return totalScore;
         }
 
         function calculateScore(candidate, currentRoom, studentMap, preferMutual) {
